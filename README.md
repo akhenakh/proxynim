@@ -74,7 +74,7 @@ Add the following block to the `providers` section of your configuration. This i
         "id": "deepseek-ai/deepseek-v4-flash",
         "name": "DeepSeek v4 Flash",
         "context_window": 1048576,
-        "default_max_tokens": 384000
+        "default_max_tokens": 262144
       },
       {
         "id": "mistralai/mistral-medium-3.5-128b",

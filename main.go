@@ -195,7 +195,7 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 	}
 }
 
-// fixRequestData sanitizes history to prevent NVIDIA NIM's API Gateway from dropping the payload
+// fixRequestData sanitizes history to prevent NVIDIA NIM's Python backend from crashing on json.loads()
 func fixRequestData(req map[string]any) {
 	msgs, ok := req["messages"].([]any)
 	if !ok {
@@ -207,25 +207,53 @@ func fixRequestData(req map[string]any) {
 			continue
 		}
 
-		// Remove reasoning_content from history to prevent upstream schema rejection
-		if role, _ := msg["role"].(string); role == "assistant" {
+		role, _ := msg["role"].(string)
+
+		// Sanitize Assistant messages (History)
+		if role == "assistant" {
 			delete(msg, "reasoning_content")
+
+			// Some strict parsers crash if content is completely null. Force to empty string.
+			if msg["content"] == nil {
+				msg["content"] = ""
+			}
 		}
 
-		// Fix incoming numeric tool_call_ids (must be strings)
+		// Fix incoming numeric tool_call_ids in 'tool' messages
 		if tcid, ok := msg["tool_call_id"]; ok {
 			if v, isFloat := tcid.(float64); isFloat {
 				msg["tool_call_id"] = fmt.Sprintf("%.0f", v)
 			}
 		}
 
-		// Fix numeric tool_calls IDs inside assistant messages
+		// Deep-sanitize tool_calls array inside 'assistant' messages
 		if tcs, ok := msg["tool_calls"].([]any); ok {
 			for _, tc := range tcs {
 				if tcMap, ok := tc.(map[string]any); ok {
+
+					// Fix numeric IDs
 					if id, ok := tcMap["id"]; ok {
 						if v, isFloat := id.(float64); isFloat {
 							tcMap["id"] = fmt.Sprintf("%.0f", v)
+						}
+					}
+
+					// Bulletproof arguments mapping to prevent "Expecting value: line 1 column 1"
+					if fn, ok := tcMap["function"].(map[string]any); ok {
+						args, hasArgs := fn["arguments"]
+
+						if !hasArgs || args == nil {
+							fn["arguments"] = "{}"
+						} else if strArgs, isStr := args.(string); isStr {
+							// If the model generated an empty string, python json.loads("") will crash.
+							// Force it to a valid empty JSON object string.
+							if strings.TrimSpace(strArgs) == "" {
+								fn["arguments"] = "{}"
+							}
+						} else {
+							// If a client accidentally serialized arguments as a JSON map instead of string
+							b, _ := json.Marshal(args)
+							fn["arguments"] = string(b)
 						}
 					}
 				}
