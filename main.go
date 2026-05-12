@@ -179,6 +179,14 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 		}
 	}
 
+	// deepseek-ai/deepseek-v4-flash
+	if strings.Contains(model, "deepseek-v4-flash") {
+		if _, exists := req["chat_template_kwargs"]; !exists {
+			req["chat_template_kwargs"] = map[string]any{"thinking": true, "reasoning_effort": "high"}
+			log.Printf("[%s] injected chat_template_kwargs for deepseek-v4-flash", reqID)
+		}
+	}
+
 	// mistralai/mistral-medium-3.5-128b
 	if strings.Contains(model, "mistral-medium") {
 		if _, exists := req["reasoning_effort"]; !exists {
@@ -199,19 +207,19 @@ func fixRequestData(req map[string]any) {
 			continue
 		}
 
-		// 1. Remove reasoning_content from history to prevent upstream schema rejection
+		// Remove reasoning_content from history to prevent upstream schema rejection
 		if role, _ := msg["role"].(string); role == "assistant" {
 			delete(msg, "reasoning_content")
 		}
 
-		// 2. Fix incoming numeric tool_call_ids (must be strings)
+		// Fix incoming numeric tool_call_ids (must be strings)
 		if tcid, ok := msg["tool_call_id"]; ok {
 			if v, isFloat := tcid.(float64); isFloat {
 				msg["tool_call_id"] = fmt.Sprintf("%.0f", v)
 			}
 		}
 
-		// 3. Fix numeric tool_calls IDs inside assistant messages
+		// Fix numeric tool_calls IDs inside assistant messages
 		if tcs, ok := msg["tool_calls"].([]any); ok {
 			for _, tc := range tcs {
 				if tcMap, ok := tc.(map[string]any); ok {
@@ -281,7 +289,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request, cfg *serverCo
 		writeJSONError(w, http.StatusBadGateway, "upstream_request_failed")
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	log.Printf("[%s] upstream status=%d", reqID, resp.StatusCode)
 	w.Header().Set("Content-Type", "application/json")
@@ -391,7 +399,7 @@ func proxyStream(w http.ResponseWriter, r *http.Request, cfg *serverConfig, reqI
 		writeJSONError(w, http.StatusBadGateway, "upstream_request_failed")
 		return err
 	}
-	defer upResp.Body.Close()
+	defer func() { _ = upResp.Body.Close() }()
 
 	if upResp.StatusCode < 200 || upResp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(upResp.Body)
@@ -538,7 +546,7 @@ func logForwardedUpstreamBody(reqID string, cfg *serverConfig, body []byte) {
 func mustJSONTrunc(v any, maxChars int) string {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Sprintf(`{"_error":"json_marshal_failed"}`)
+		return `{"_error":"json_marshal_failed"}`
 	}
 	s := string(b)
 	if maxChars == 0 {
