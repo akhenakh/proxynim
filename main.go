@@ -10,18 +10,22 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
 
+// fileConfig holds optional JSON-file overrides for upstream URL and API key.
 type fileConfig struct {
 	NvidiaURL string `json:"nvidia_url"`
 	NvidiaKey string `json:"nvidia_key"`
 }
 
+// serverConfig holds the fully resolved runtime configuration (env vars win over file).
 type serverConfig struct {
 	addr                string
 	upstreamURL         string
@@ -30,8 +34,25 @@ type serverConfig struct {
 	timeout             time.Duration
 	logBodyMax          int
 	logStreamPreviewMax int
+	debug               bool
 }
 
+// Hardened transport to handle extremely slow reasoning models without dropping the connection
+var hardenedTransport = &http.Transport{
+	Proxy: http.ProxyFromEnvironment,
+	DialContext: (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 60 * time.Second,
+	}).DialContext,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   15 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+	ResponseHeaderTimeout: 10 * time.Minute, // Give NIM up to 10 minutes to start responding
+}
+
+// main loads config, registers routes, and starts the HTTP server.
 func main() {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -54,9 +75,8 @@ func main() {
 		Addr:              cfg.addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      0,
-		IdleTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// Intentionally omitting ReadTimeout and WriteTimeout to support multi-minute reasoning streams
 	}
 
 	log.Printf("listening on %s", cfg.addr)
@@ -69,6 +89,7 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
+// loadConfig merges the optional JSON file with environment variables (env wins).
 func loadConfig() (*serverConfig, error) {
 	fc, _ := loadFileConfig(strings.TrimSpace(envOr("CONFIG_PATH", "config.json")))
 	if fc == nil {
@@ -84,7 +105,7 @@ func loadConfig() (*serverConfig, error) {
 	providerAPIKey := strings.TrimSpace(envOr("PROVIDER_API_KEY", fc.NvidiaKey))
 	serverAPIKey := strings.TrimSpace(envOr("SERVER_API_KEY", ""))
 
-	timeout := 5 * time.Minute
+	timeout := 10 * time.Minute
 	if raw := strings.TrimSpace(envOr("UPSTREAM_TIMEOUT_SECONDS", "")); raw != "" {
 		seconds, err := strconv.Atoi(raw)
 		if err != nil || seconds <= 0 {
@@ -111,6 +132,11 @@ func loadConfig() (*serverConfig, error) {
 		logStreamPreviewMax = n
 	}
 
+	debug := false
+	if raw := strings.TrimSpace(envOr("DEBUG", "")); raw != "" {
+		debug = strings.EqualFold(raw, "true") || raw == "1"
+	}
+
 	if providerAPIKey == "" {
 		return nil, errors.New("missing nvidia_key in config.json (or PROVIDER_API_KEY)")
 	}
@@ -122,9 +148,11 @@ func loadConfig() (*serverConfig, error) {
 		timeout:             timeout,
 		logBodyMax:          logBodyMax,
 		logStreamPreviewMax: logStreamPreviewMax,
+		debug:               debug,
 	}, nil
 }
 
+// loadFileConfig reads and parses the JSON config file at the given path.
 func loadFileConfig(path string) (*fileConfig, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -137,6 +165,7 @@ func loadFileConfig(path string) (*fileConfig, error) {
 	return &fc, nil
 }
 
+// envOr returns the env var value for key, or fallback if unset.
 func envOr(key, fallback string) string {
 	if v, ok := os.LookupEnv(key); ok {
 		return v
@@ -144,13 +173,14 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// injectModelSpecificParams modifies the payload automatically for strict NVIDIA NIM reasoning models
+// injectModelSpecificParams patches the request with model-specific parameters
+// (chat_template_kwargs, reasoning_effort, reasoning_budget) that NVIDIA NIM
+// requires for certain models but OpenAI clients don't know about.
 func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 	// z-ai/glm-5.1
 	if strings.Contains(model, "glm-5.1") {
 		if _, exists := req["chat_template_kwargs"]; !exists {
 			req["chat_template_kwargs"] = map[string]any{"enable_thinking": true, "clear_thinking": false}
-			log.Printf("[%s] injected chat_template_kwargs for glm-5.1", reqID)
 		}
 	}
 
@@ -158,7 +188,6 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 	if strings.Contains(model, "kimi-k2") {
 		if _, exists := req["chat_template_kwargs"]; !exists {
 			req["chat_template_kwargs"] = map[string]any{"thinking": true}
-			log.Printf("[%s] injected chat_template_kwargs for kimi", reqID)
 		}
 	}
 
@@ -183,7 +212,6 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 	if strings.Contains(model, "deepseek-v4-flash") {
 		if _, exists := req["chat_template_kwargs"]; !exists {
 			req["chat_template_kwargs"] = map[string]any{"thinking": true, "reasoning_effort": "high"}
-			log.Printf("[%s] injected chat_template_kwargs for deepseek-v4-flash", reqID)
 		}
 	}
 
@@ -195,13 +223,15 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 	}
 }
 
-// fixRequestData sanitizes history to prevent NVIDIA NIM's Python backend from crashing on json.loads()
-func fixRequestData(req map[string]any) {
+// fixRequestData sanitizes inbound messages: strips reasoning_content NVIDIA
+// rejects, coerces numeric tool_call IDs to strings, ensures content is never
+// null, and marshals non-string function arguments.
+func fixRequestData(reqID string, req map[string]any) {
 	msgs, ok := req["messages"].([]any)
 	if !ok {
 		return
 	}
-	for _, m := range msgs {
+	for i, m := range msgs {
 		msg, ok := m.(map[string]any)
 		if !ok {
 			continue
@@ -211,16 +241,29 @@ func fixRequestData(req map[string]any) {
 
 		// Sanitize Assistant messages (History)
 		if role == "assistant" {
-			delete(msg, "reasoning_content")
+			if _, hasReasoning := msg["reasoning_content"]; hasReasoning {
+				delete(msg, "reasoning_content")
+				log.Printf("[%s] Sanitized: stripped 'reasoning_content' from msg %d", reqID, i)
+			}
 
 			// Some strict parsers crash if content is completely null. Force to empty string.
+			if msg["content"] == nil {
+				msg["content"] = ""
+				log.Printf("[%s] Sanitized: forced null content to empty string in msg %d", reqID, i)
+			}
+
+			if msg["tool_calls"] == nil {
+				delete(msg, "tool_calls")
+			}
+		}
+
+		if role == "tool" {
 			if msg["content"] == nil {
 				msg["content"] = ""
 			}
 		}
 
-		// Fix incoming numeric tool_call_ids in 'tool' messages
-		if tcid, ok := msg["tool_call_id"]; ok {
+		if tcid, ok := msg["tool_call_id"]; ok && tcid != nil {
 			if v, isFloat := tcid.(float64); isFloat {
 				msg["tool_call_id"] = fmt.Sprintf("%.0f", v)
 			}
@@ -228,10 +271,11 @@ func fixRequestData(req map[string]any) {
 
 		// Deep-sanitize tool_calls array inside 'assistant' messages
 		if tcs, ok := msg["tool_calls"].([]any); ok {
-			for _, tc := range tcs {
+			for tcIdx, tc := range tcs {
 				if tcMap, ok := tc.(map[string]any); ok {
-
-					// Fix numeric IDs
+					if _, hasType := tcMap["type"]; !hasType {
+						tcMap["type"] = "function"
+					}
 					if id, ok := tcMap["id"]; ok {
 						if v, isFloat := id.(float64); isFloat {
 							tcMap["id"] = fmt.Sprintf("%.0f", v)
@@ -244,11 +288,13 @@ func fixRequestData(req map[string]any) {
 
 						if !hasArgs || args == nil {
 							fn["arguments"] = "{}"
+							log.Printf("[%s] Sanitized: fixed missing/null arguments to '{}' in tool_call %d, msg %d", reqID, tcIdx, i)
 						} else if strArgs, isStr := args.(string); isStr {
 							// If the model generated an empty string, python json.loads("") will crash.
 							// Force it to a valid empty JSON object string.
 							if strings.TrimSpace(strArgs) == "" {
 								fn["arguments"] = "{}"
+								log.Printf("[%s] Sanitized: fixed empty string arguments to '{}' in tool_call %d, msg %d", reqID, tcIdx, i)
 							}
 						} else {
 							// If a client accidentally serialized arguments as a JSON map instead of string
@@ -262,6 +308,26 @@ func fixRequestData(req map[string]any) {
 	}
 }
 
+// dumpCrashingPayload pretty-prints the request payload for crash diagnostics,
+// truncating the system prompt to keep logs readable.
+func dumpCrashingPayload(reqID string, payload []byte) string {
+	var req map[string]any
+	if err := json.Unmarshal(payload, &req); err == nil {
+		if msgs, ok := req["messages"].([]any); ok && len(msgs) > 0 {
+			if firstMsg, ok := msgs[0].(map[string]any); ok {
+				if content, ok := firstMsg["content"].(string); ok && len(content) > 500 {
+					firstMsg["content"] = content[:500] + "\n... [TRUNCATED SYSTEM PROMPT FOR LOGS]"
+				}
+			}
+		}
+		b, _ := json.MarshalIndent(req, "", "  ")
+		return string(b)
+	}
+	return string(payload)
+}
+
+// handleChatCompletions is the core proxy handler: auth, decode, sanitize,
+// inject model params, then forward to upstream (streaming or non-streaming).
 func handleChatCompletions(w http.ResponseWriter, r *http.Request, cfg *serverConfig) {
 	reqID := fmt.Sprintf("req_%d", time.Now().UnixNano())
 	if cfg.serverAPIKey != "" && !checkInboundAuth(r, cfg.serverAPIKey) {
@@ -290,22 +356,24 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request, cfg *serverCo
 	model, _ := openaiReq["model"].(string)
 
 	injectModelSpecificParams(reqID, model, openaiReq)
-	fixRequestData(openaiReq)
+	fixRequestData(reqID, openaiReq)
 
-	logForwardedRequest(reqID, cfg, model, isStream, openaiReq)
-
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(openaiReq); err != nil {
+	cleanBodyBytes, err := json.Marshal(openaiReq)
+	if err != nil {
 		log.Printf("[%s] error marshaling clean request: %v", reqID, err)
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	cleanBodyBytes := buf.Bytes()
+
+	var debugFile string
+	if cfg.debug {
+		debugFile = filepath.Join(os.TempDir(), fmt.Sprintf("nim_debug_%s.json", reqID))
+		_ = os.WriteFile(debugFile, cleanBodyBytes, 0644)
+		log.Printf("[%s] DEBUG full request saved to: %s", reqID, debugFile)
+	}
 
 	if isStream {
-		if err := proxyStream(w, r, cfg, reqID, cleanBodyBytes); err != nil {
+		if err := proxyStream(w, r, cfg, reqID, cleanBodyBytes, debugFile); err != nil {
 			log.Printf("[%s] stream proxy error: %v", reqID, err)
 		}
 		return
@@ -319,16 +387,23 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request, cfg *serverCo
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	log.Printf("[%s] upstream status=%d", reqID, resp.StatusCode)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(upstreamRespBody)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		logForwardedUpstreamBody(reqID, cfg, upstreamRespBody)
+		log.Printf("\n=============================================")
+		log.Printf("[%s] 🚨 UPSTREAM CRASHED WITH %d 🚨", reqID, resp.StatusCode)
+		log.Printf("[%s] ERROR MSG: %s", reqID, string(upstreamRespBody))
+		log.Printf("[%s] PAYLOAD SENT:\n%s", reqID, dumpCrashingPayload(reqID, cleanBodyBytes))
+		log.Printf("=============================================\n")
+	} else if debugFile != "" {
+		_ = os.Remove(debugFile)
 	}
 }
 
+// checkInboundAuth validates the request against the expected API key via
+// Authorization: Bearer or X-Api-Key header (constant-time compare).
 func checkInboundAuth(r *http.Request, expected string) bool {
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
@@ -341,6 +416,7 @@ func checkInboundAuth(r *http.Request, expected string) bool {
 	return false
 }
 
+// setSafeUpstreamHeaders sets headers required by the NVIDIA NIM upstream.
 func setSafeUpstreamHeaders(req *http.Request, cfg *serverConfig, isStream bool) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+cfg.providerAPIKey)
@@ -354,6 +430,8 @@ func setSafeUpstreamHeaders(req *http.Request, cfg *serverConfig, isStream bool)
 	}
 }
 
+// doUpstream sends a non-streaming request to the upstream NIM endpoint and
+// returns the response body (re-wrapped for re-reading by the caller).
 func doUpstream(ctx context.Context, cfg *serverConfig, bodyBytes []byte, isStream bool) ([]byte, *http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.upstreamURL, bytes.NewReader(bodyBytes))
 	if err != nil {
@@ -362,7 +440,11 @@ func doUpstream(ctx context.Context, cfg *serverConfig, bodyBytes []byte, isStre
 	req.ContentLength = int64(len(bodyBytes))
 	setSafeUpstreamHeaders(req, cfg, isStream)
 
-	client := &http.Client{Timeout: cfg.timeout}
+	// Use our hardened transport for non-streaming requests too just in case
+	client := &http.Client{
+		Timeout:   cfg.timeout,
+		Transport: hardenedTransport,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, err
@@ -379,7 +461,7 @@ func doUpstream(ctx context.Context, cfg *serverConfig, bodyBytes []byte, isStre
 	return respBody, resp, nil
 }
 
-// fixStreamIDs corrects outgoing streams from NVIDIA so clients don't crash or cache bad tool IDs
+// fixStreamIDs coerces numeric tool_call IDs to strings in streaming chunks.
 func fixStreamIDs(chunk map[string]any) {
 	choices, ok := chunk["choices"].([]any)
 	if !ok {
@@ -413,7 +495,9 @@ func fixStreamIDs(chunk map[string]any) {
 	}
 }
 
-func proxyStream(w http.ResponseWriter, r *http.Request, cfg *serverConfig, reqID string, bodyBytes []byte) error {
+// proxyStream forwards a streaming request to the upstream, parsing and fixing
+// each SSE chunk before writing it to the client response.
+func proxyStream(w http.ResponseWriter, r *http.Request, cfg *serverConfig, reqID string, bodyBytes []byte, debugFile string) error {
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, cfg.upstreamURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return err
@@ -421,7 +505,11 @@ func proxyStream(w http.ResponseWriter, r *http.Request, cfg *serverConfig, reqI
 	upReq.ContentLength = int64(len(bodyBytes))
 	setSafeUpstreamHeaders(upReq, cfg, true)
 
-	client := &http.Client{Timeout: 0}
+	// Use our hardened transport with massive keep-alives and zero total timeout
+	client := &http.Client{
+		Timeout:   0,
+		Transport: hardenedTransport,
+	}
 	upResp, err := client.Do(upReq)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "upstream_request_failed")
@@ -434,8 +522,18 @@ func proxyStream(w http.ResponseWriter, r *http.Request, cfg *serverConfig, reqI
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(upResp.StatusCode)
 		_, _ = w.Write(raw)
-		logForwardedUpstreamBody(reqID, cfg, raw)
+
+		log.Printf("\n=============================================")
+		log.Printf("[%s] 🚨 UPSTREAM CRASHED WITH %d 🚨", reqID, upResp.StatusCode)
+		log.Printf("[%s] ERROR MSG: %s", reqID, string(raw))
+		log.Printf("[%s] PAYLOAD SENT:\n%s", reqID, dumpCrashingPayload(reqID, bodyBytes))
+		log.Printf("=============================================\n")
+
 		return fmt.Errorf("upstream status %d", upResp.StatusCode)
+	}
+
+	if debugFile != "" {
+		_ = os.Remove(debugFile)
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -452,7 +550,6 @@ func proxyStream(w http.ResponseWriter, r *http.Request, cfg *serverConfig, reqI
 
 	reader := bufio.NewReader(upResp.Body)
 	chunkCount, textChars, reasoningChars := 0, 0, 0
-	var preview strings.Builder
 	sawDone := false
 
 	for {
@@ -466,7 +563,6 @@ func proxyStream(w http.ResponseWriter, r *http.Request, cfg *serverConfig, reqI
 
 		strLine := string(line)
 
-		// If it's an empty line or not a data event, write it as-is (maintaining exact SSE framing)
 		if !strings.HasPrefix(strLine, "data:") {
 			_, _ = w.Write(line)
 			if strLine == "\n" || strLine == "\r\n" {
@@ -494,9 +590,6 @@ func proxyStream(w http.ResponseWriter, r *http.Request, cfg *serverConfig, reqI
 					if delta, ok := ch["delta"].(map[string]any); ok {
 						if c, _ := delta["content"].(string); c != "" {
 							textChars += len([]rune(c))
-							if cfg.logStreamPreviewMax > 0 && preview.Len() < cfg.logStreamPreviewMax {
-								preview.WriteString(takeFirstRunes(c, cfg.logStreamPreviewMax-preview.Len()))
-							}
 						}
 						if r, _ := delta["reasoning_content"].(string); r != "" {
 							reasoningChars += len([]rune(r))
@@ -505,8 +598,12 @@ func proxyStream(w http.ResponseWriter, r *http.Request, cfg *serverConfig, reqI
 				}
 			}
 
-			// Re-marshal and write using the same line ending it came with
-			b, _ := json.Marshal(chunk)
+			b, err := json.Marshal(chunk)
+			if err != nil {
+				_, _ = w.Write(line)
+				flusher.Flush()
+				continue
+			}
 			if strings.HasSuffix(strLine, "\r\n") {
 				_, _ = w.Write([]byte("data: " + string(b) + "\r\n"))
 			} else {
@@ -520,14 +617,11 @@ func proxyStream(w http.ResponseWriter, r *http.Request, cfg *serverConfig, reqI
 		flusher.Flush()
 	}
 
-	if cfg.logStreamPreviewMax > 0 {
-		log.Printf("[%s] stream summary chunks=%d text_chars=%d reasoning_chars=%d saw_done=%v preview=%q", reqID, chunkCount, textChars, reasoningChars, sawDone, preview.String())
-	} else {
-		log.Printf("[%s] stream summary chunks=%d text_chars=%d reasoning_chars=%d saw_done=%v", reqID, chunkCount, textChars, reasoningChars, sawDone)
-	}
+	log.Printf("[%s] stream summary chunks=%d text_chars=%d reasoning_chars=%d saw_done=%v", reqID, chunkCount, textChars, reasoningChars, sawDone)
 	return nil
 }
 
+// writeJSONError writes a structured JSON error response with the given status and code.
 func writeJSONError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -538,61 +632,4 @@ func writeJSONError(w http.ResponseWriter, status int, code string) {
 			"message": code,
 		},
 	})
-}
-
-func logForwardedRequest(reqID string, cfg *serverConfig, model string, stream bool, payload map[string]any) {
-	inSummary := map[string]any{
-		"model":  model,
-		"stream": stream,
-	}
-	log.Printf("[%s] inbound summary=%s", reqID, mustJSONTrunc(inSummary, cfg.logBodyMax))
-	log.Printf("[%s] forward url=%s", reqID, cfg.upstreamURL)
-
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(payload)
-
-	s := buf.String()
-	if cfg.logBodyMax > 0 && len([]rune(s)) > cfg.logBodyMax {
-		s = string([]rune(s)[:cfg.logBodyMax]) + "...(truncated)"
-	}
-	log.Printf("[%s] forward body=%s", reqID, strings.TrimSpace(s))
-}
-
-func logForwardedUpstreamBody(reqID string, cfg *serverConfig, body []byte) {
-	if cfg.logBodyMax == 0 {
-		return
-	}
-	s := string(body)
-	if len([]rune(s)) > cfg.logBodyMax {
-		s = string([]rune(s)[:cfg.logBodyMax]) + "...(truncated)"
-	}
-	log.Printf("[%s] upstream body=%s", reqID, s)
-}
-
-func mustJSONTrunc(v any, maxChars int) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return `{"_error":"json_marshal_failed"}`
-	}
-	s := string(b)
-	if maxChars == 0 {
-		return "(disabled)"
-	}
-	if len([]rune(s)) > maxChars {
-		return string([]rune(s)[:maxChars]) + "...(truncated)"
-	}
-	return s
-}
-
-func takeFirstRunes(s string, max int) string {
-	if max <= 0 || s == "" {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max])
 }
