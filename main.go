@@ -203,9 +203,7 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 
 	// deepseek-ai/deepseek-v4-pro
 	if strings.Contains(model, "deepseek-v4-pro") {
-		if _, exists := req["chat_template_kwargs"]; !exists {
-			req["chat_template_kwargs"] = map[string]any{"thinking": false}
-		}
+		req["chat_template_kwargs"] = map[string]any{"thinking": true} // Force override
 	}
 
 	// deepseek-ai/deepseek-v4-flash
