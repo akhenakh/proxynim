@@ -214,8 +214,11 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 	}
 
 	// mistralai/mistral-medium-3.5-128b
+	// Mistral only supports "none" and "high" — coerce unsupported values (e.g. "medium")
 	if strings.Contains(model, "mistral-medium") {
-		if _, exists := req["reasoning_effort"]; !exists {
+		if v, exists := req["reasoning_effort"]; !exists {
+			req["reasoning_effort"] = "high"
+		} else if s, ok := v.(string); ok && s != "none" && s != "high" {
 			req["reasoning_effort"] = "high"
 		}
 	}
