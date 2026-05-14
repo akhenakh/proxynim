@@ -201,6 +201,16 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 		}
 	}
 
+	// nvidia/nemotron-3-super-120b-a12b
+	if strings.Contains(model, "nemotron-3-super") {
+		if _, exists := req["chat_template_kwargs"]; !exists {
+			req["chat_template_kwargs"] = map[string]any{"enable_thinking": true}
+		}
+		if _, exists := req["reasoning_budget"]; !exists {
+			req["reasoning_budget"] = 16384
+		}
+	}
+
 	// deepseek-ai/deepseek-v4-pro
 	if strings.Contains(model, "deepseek-v4-pro") {
 		req["chat_template_kwargs"] = map[string]any{"thinking": true} // Force override
@@ -220,6 +230,29 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 			req["reasoning_effort"] = "high"
 		} else if s, ok := v.(string); ok && s != "none" && s != "high" {
 			req["reasoning_effort"] = "high"
+		}
+	}
+
+	// mistralai/mistral-small-4-119b-2603
+	// Mistral only supports "none" and "high" — coerce unsupported values
+	if strings.Contains(model, "mistral-small-4") {
+		if v, exists := req["reasoning_effort"]; !exists {
+			req["reasoning_effort"] = "high"
+		} else if s, ok := v.(string); ok && s != "none" && s != "high" {
+			req["reasoning_effort"] = "high"
+		}
+	}
+
+	// minimaxai/minimax-m2.7
+	if strings.Contains(model, "minimax-m2.7") {
+		if _, exists := req["temperature"]; !exists {
+			req["temperature"] = 1.0
+		}
+		if _, exists := req["top_p"]; !exists {
+			req["top_p"] = 0.95
+		}
+		if _, exists := req["top_k"]; !exists {
+			req["top_k"] = 40
 		}
 	}
 }
