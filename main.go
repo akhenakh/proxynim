@@ -255,6 +255,19 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 			req["top_k"] = 40
 		}
 	}
+
+	// minimaxai/minimax-m3
+	if strings.Contains(model, "minimax-m3") {
+		if _, exists := req["temperature"]; !exists {
+			req["temperature"] = 1.0
+		}
+		if _, exists := req["top_p"]; !exists {
+			req["top_p"] = 0.95
+		}
+		if _, exists := req["top_k"]; !exists {
+			req["top_k"] = 40
+		}
+	}
 }
 
 // fixRequestData sanitizes inbound messages: strips reasoning_content NVIDIA

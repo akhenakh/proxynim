@@ -99,6 +99,12 @@ Add the following block to the `providers` section of your configuration. This i
         "name": "MiniMax M2.7",
         "context_window": 200000,
         "default_max_tokens": 8192
+      },
+      {
+        "id": "minimaxai/minimax-m3",
+        "name": "MiniMax M3",
+        "context_window": 200000,
+        "default_max_tokens": 8192
       }
       ]
     }
