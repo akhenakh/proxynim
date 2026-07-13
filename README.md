@@ -53,6 +53,12 @@ Add the following block to the `providers` section of your configuration. This i
         "default_max_tokens": 131072
       },
       {
+        "id": "z-ai/glm-5.2",
+        "name": "GLM 5.2 (Reasoning)",
+        "context_window": 200000,
+        "default_max_tokens": 131072
+      },
+      {
         "id": "moonshotai/kimi-k2.6",
         "name": "Kimi k2.6",
         "context_window": 262144,

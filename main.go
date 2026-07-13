@@ -184,6 +184,13 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 		}
 	}
 
+	// z-ai/glm-5.2
+	if strings.Contains(model, "glm-5.2") {
+		if _, exists := req["chat_template_kwargs"]; !exists {
+			req["chat_template_kwargs"] = map[string]any{"enable_thinking": true, "clear_thinking": false}
+		}
+	}
+
 	// moonshotai/kimi-k2.6
 	if strings.Contains(model, "kimi-k2") {
 		if _, exists := req["chat_template_kwargs"]; !exists {
