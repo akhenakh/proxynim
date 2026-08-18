@@ -37,7 +37,7 @@ Client → inbound auth check → parse JSON → injectModelSpecificParams → f
 ```
 
 - **Inbound auth** (`checkInboundAuth`): constant-time comparison of Bearer token or X-Api-Key header.
-- **`injectModelSpecificParams`**: Patches the request JSON with `chat_template_kwargs` or `reasoning_effort` for specific NVIDIA NIM models that require them (glm-5.1, glm-5.2, kimi-k2, nemotron-3, nemotron-3-super, deepseek-v4-pro, deepseek-v4-flash, mistral-medium, mistral-small-4, minimax-m2.7). Checks by `strings.Contains` on model name — not exact match.
+- **`injectModelSpecificParams`**: Patches the request JSON with `chat_template_kwargs` or `reasoning_effort` for specific NVIDIA NIM models that require them (glm-5.1, glm-5.2, kimi-k2, nemotron-3, nemotron-3-super, deepseek-v4-pro, deepseek-v4-flash, mistral-medium, mistral-small-4, minimax-m2.7, muse-glimmer). Checks by `strings.Contains` on model name — not exact match.
 - **`fixRequestData`**: Strips `reasoning_content` from assistant messages in history (NVIDIA rejects it), coerces numeric `tool_call_id` and `tool_calls[].id` to strings (JSON number→string mismatch).
 - **`fixStreamIDs`**: Same numeric→string ID fix but on streaming response chunks.
 - **BOM stripping**: Request body is stripped of UTF-8 BOM (`\xef\xbb\xbf`) before parsing.

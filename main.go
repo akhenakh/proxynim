@@ -275,6 +275,16 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 			req["top_k"] = 40
 		}
 	}
+
+	// meta/muse-glimmer-30b
+	if strings.Contains(model, "muse-glimmer") {
+		if _, exists := req["temperature"]; !exists {
+			req["temperature"] = 1.0
+		}
+		if _, exists := req["top_p"]; !exists {
+			req["top_p"] = 0.95
+		}
+	}
 }
 
 // fixRequestData sanitizes inbound messages: strips reasoning_content NVIDIA

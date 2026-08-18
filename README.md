@@ -3,7 +3,7 @@
 A lightweight, robust Go proxy that bridges the gap between standard OpenAI-compatible CLI clients (like [Crush](https://github.com/charmbracelet/crush)) and the strict, proprietary API requirements of NVIDIA NIM.
 
 ### Why is this needed?
-NVIDIA NIM hosts a diverse set of models (Mistral, DeepSeek, Z.ai, Moonshot, Minimax), but requires specific root-level JSON parameters (like `chat_template_kwargs` or `reasoning_budget`) to enable reasoning features. Furthermore, NVIDIA's API Gateway strictly validates incoming schemas: it drops requests if `tool_call_id`s are numeric or if non-standard keys like `reasoning_content` are sent in the chat history.
+NVIDIA NIM hosts a diverse set of models (Mistral, DeepSeek, Z.ai, Moonshot, Minimax, Meta), but requires specific root-level JSON parameters (like `chat_template_kwargs` or `reasoning_budget`) to enable reasoning features. Furthermore, NVIDIA's API Gateway strictly validates incoming schemas: it drops requests if `tool_call_id`s are numeric or if non-standard keys like `reasoning_content` are sent in the chat history.
 
 Standard tools like `Crush` don't know about these NIM quirks. **This proxy sits in the middle and fixes everything transparently:**
 - **Auto-injects proprietary kwargs** (`enable_thinking`, `reasoning_effort`, etc.) based on the specific model requested.
@@ -110,6 +110,12 @@ Add the following block to the `providers` section of your configuration. This i
         "id": "minimaxai/minimax-m3",
         "name": "MiniMax M3",
         "context_window": 200000,
+        "default_max_tokens": 8192
+      },
+      {
+        "id": "meta/muse-glimmer-30b",
+        "name": "Muse Glimmer 30B",
+        "context_window": 131072,
         "default_max_tokens": 8192
       }
       ]
