@@ -83,6 +83,12 @@ Add the following block to the `providers` section of your configuration. This i
         "default_max_tokens": 262144
       },
       {
+        "id": "deepseek-ai/deepseek-v4-flash-0731",
+        "name": "DeepSeek v4 Flash 0731",
+        "context_window": 1048576,
+        "default_max_tokens": 262144
+      },
+      {
         "id": "mistralai/mistral-medium-3.5-128b",
         "name": "Mistral Medium 3.5",
         "context_window": 262144,
@@ -129,7 +135,7 @@ Add the following block to the `providers` section of your configuration. This i
 ### 3. Run Crush
 Once configured and the proxy is running, you can invoke crush with any of the NIM models:
 ```bash
-crush --model "nimproxy/z-ai/glm-5.1" "Look at main.go and list the functions"
+crush --model "nimproxy/deepseek-ai/deepseek-v4-flash-0731" "Look at main.go and list the functions"
 ```
 You will see the proxy intercepting the call, injecting the correct `chat_template_kwargs`, and seamlessly streaming the response back to your terminal!
 
