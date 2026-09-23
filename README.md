@@ -59,6 +59,18 @@ Add the following block to the `providers` section of your configuration. This i
         "default_max_tokens": 131072
       },
       {
+        "id": "z-ai/glm-5.3",
+        "name": "GLM 5.3 (Reasoning)",
+        "context_window": 1048576,
+        "default_max_tokens": 131072
+      },
+      {
+        "id": "z-ai/glm-5.3-flash",
+        "name": "GLM 5.3 Flash (Reasoning)",
+        "context_window": 1048576,
+        "default_max_tokens": 131072
+      },
+      {
         "id": "moonshotai/kimi-k2.6",
         "name": "Kimi k2.6",
         "context_window": 262144,
@@ -85,6 +97,12 @@ Add the following block to the `providers` section of your configuration. This i
       {
         "id": "deepseek-ai/deepseek-v4-flash-0731",
         "name": "DeepSeek v4 Flash 0731",
+        "context_window": 1048576,
+        "default_max_tokens": 262144
+      },
+      {
+        "id": "deepseek-ai/deepseek-v4.1-flash",
+        "name": "DeepSeek v4.1 Flash",
         "context_window": 1048576,
         "default_max_tokens": 262144
       },

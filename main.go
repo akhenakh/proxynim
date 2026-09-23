@@ -191,6 +191,13 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 		}
 	}
 
+	// z-ai/glm-5.3 (also matches z-ai/glm-5.3-flash)
+	if strings.Contains(model, "glm-5.3") {
+		if _, exists := req["chat_template_kwargs"]; !exists {
+			req["chat_template_kwargs"] = map[string]any{"enable_thinking": true, "clear_thinking": false}
+		}
+	}
+
 	// moonshotai/kimi-k2.6
 	if strings.Contains(model, "kimi-k2") {
 		if _, exists := req["chat_template_kwargs"]; !exists {
@@ -225,6 +232,13 @@ func injectModelSpecificParams(reqID string, model string, req map[string]any) {
 
 	// deepseek-ai/deepseek-v4-flash
 	if strings.Contains(model, "deepseek-v4-flash") {
+		if _, exists := req["chat_template_kwargs"]; !exists {
+			req["chat_template_kwargs"] = map[string]any{"thinking": true, "reasoning_effort": "high"}
+		}
+	}
+
+	// deepseek-ai/deepseek-v4.1-flash
+	if strings.Contains(model, "deepseek-v4.1-flash") {
 		if _, exists := req["chat_template_kwargs"]; !exists {
 			req["chat_template_kwargs"] = map[string]any{"thinking": true, "reasoning_effort": "high"}
 		}
